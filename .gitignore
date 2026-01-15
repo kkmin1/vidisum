@@ -1,0 +1,12 @@
+.env
+node_modules/
+dist/
+__pycache__/
+.streamlit/
+app2.py
+server.js
+package.json
+package-lock.json
+vite.config.js
+index.html
+src/
