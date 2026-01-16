@@ -60,12 +60,8 @@ st.markdown("""
 # 제목
 st.title("🎥 VidiSum: 유튜브 자막 추출 및 요약")
 
-# API 키 설정 (사이드바)
-# 1. Streamlit Secrets에서 먼저 찾고, 없으면 기본값(공란)으로 설정
-if "GEMINI_API_KEY" in st.secrets:
-    DEFAULT_API_KEY = st.secrets["GEMINI_API_KEY"]
-else:
-    DEFAULT_API_KEY = "" # 로컬 테스트 시 여기에 키를 넣거나 사이드바에서 직접 입력
+# API 키 설정 (사이드바 - 개인용 기본값 설정)
+DEFAULT_API_KEY = "AIzaSyBhmk9f8QqMLcUwR7vY7q5ZTXY63Vw-BIw" 
 
 selected_model = "gemini-1.5-flash" 
 with st.sidebar:
@@ -94,34 +90,71 @@ with st.sidebar:
             st.error(f"모델 목록을 불러올 수 없습니다: {e}")
     
     st.markdown("---")
+    st.header("고급 설정")
+    cookie_text = st.text_area(
+        "YouTube Cookies (Netscape format)", 
+        value="",
+        height=150,
+        help="유튜브 차단을 우회하기 위해 브라우저 확장 프로그램(Get cookies.txt 등)으로 추출한 쿠키를 입력하세요."
+    )
+    
+    st.markdown("---")
     st.info("이 앱은 Streamlit과 Google Gemini를 사용하여 제작되었습니다.")
 
-# 유튜브 비디오 ID 추출 함수
+# 유튜브 비디오 ID 추출 함수 (개선됨)
 def extract_video_id(url):
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
-    match = re.search(regex, url)
-    return match.group(1) if match else None
+    # 다양한 유튜브 URL 패턴 지원 (shorts, youtu.be, watch?v= 등)
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
+        r"youtu\.be\/([0-9A-Za-z_-]{11})",
+        r"youtube\.com\/shorts\/([0-9A-Za-z_-]{11})",
+        r"youtube\.com\/live\/([0-9A-Za-z_-]{11})"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
-# 자막 추출 함수 (기존의 잘 작동하던 로직 그대로 유지)
-def get_transcript(video_id):
+# 자막 추출 함수 (Cookies 지원 추가)
+def get_transcript(video_id, cookie_text=None):
+    cookie_file = None
     try:
-        api = YouTubeTranscriptApi()
-        transcript = api.fetch(video_id, languages=['ko', 'en'])
-        
-        full_text = ""
-        if hasattr(transcript, 'snippets'):
-            for snippet in transcript.snippets:
-                full_text += snippet.text + " "
-        else:
-            if isinstance(transcript, list):
-                for item in transcript:
-                    full_text += item.get('text', '') + " "
-            else:
-                 return None, "알 수 없는 자막 형식입니다."
+        # 쿠키가 제공된 경우 임시 파일로 저장하여 사용
+        if cookie_text:
+            import tempfile
+            import os
             
-        return full_text.strip()
+            # 텍스트 형식의 쿠키를 netscape 형식으로 가정하거나 
+            # 단순히 파일로 저장 (youtube-transcript-api가 요구하는 형식이어야 함)
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as tf:
+                tf.write(cookie_text)
+                cookie_file = tf.name
+        
+        # 1차 시도: 특정 언어 지정 fetch
+        api = YouTubeTranscriptApi()
+        
+        # 쿠키 파일이 있으면 사용
+        if cookie_file:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'], cookies=cookie_file)
+        else:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'])
+        
+        full_text = " ".join([t['text'] for t in transcript]).strip()
+        
+        if cookie_file and os.path.exists(cookie_file):
+            os.remove(cookie_file)
+            
+        return full_text
     except Exception as e:
-        return None, f"자막을 가져올 수 없습니다: {str(e)}"
+        if cookie_file and os.path.exists(cookie_file):
+            import os
+            os.remove(cookie_file)
+            
+        error_msg = str(e)
+        if "Cookies" in error_msg or "Login" in error_msg:
+            return None, "유튜브에서 접근을 차단했습니다. 사이드바에 쿠키(Cookies)를 입력해보세요."
+        return None, f"자막을 가져올 수 없습니다: {error_msg}"
 
 # AI 요약 함수
 def summarize_text(text, model_name):
@@ -138,7 +171,7 @@ def summarize_text(text, model_name):
         3. 톤앤매너는 명확하고 전문적인 어조를 유지하세요.
 
         [자막 내용]
-        {text[:20000]} 
+        {text[:25000]} 
         """
         response = model.generate_content(prompt)
         return response.text
@@ -160,7 +193,7 @@ if url:
                 st.error("⬅️ 사이드바에서 API 키를 먼저 설정해주세요.")
             else:
                 with st.spinner("자막 추출 및 분석 중..."):
-                    transcript_result = get_transcript(video_id)
+                    transcript_result = get_transcript(video_id, cookie_text=cookie_text)
                     
                     if isinstance(transcript_result, tuple):
                         st.error(transcript_result[1])
@@ -188,7 +221,7 @@ if 'transcript' in st.session_state:
     with tab2:
         st.text_area("스크립트", transcript, height=600)
         
-        # 자막 다운로드 버튼 추가
+        # 자막 다운로드 버튼 유지
         file_name = f"transcript_{video_id}.txt" if 'video_id' in locals() else "transcript.txt"
         st.download_button(
             label="📄 자막 다운로드 (.txt)",
