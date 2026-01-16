@@ -2,6 +2,8 @@ import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 import google.generativeai as genai
 import re
+import os
+import tempfile
 
 # 페이지 설정
 st.set_page_config(page_title="VidiSum - 유튜브 요약기", page_icon="🎥", layout="wide")
@@ -116,44 +118,49 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# 자막 추출 함수 (Cookies 지원 추가)
+# 자막 추출 함수 (Cookies 지원 및 로직 유연화)
 def get_transcript(video_id, cookie_text=None):
     cookie_file = None
     try:
-        # 쿠키가 제공된 경우 임시 파일로 저장하여 사용
-        if cookie_text:
-            import tempfile
-            import os
-            
-            # 텍스트 형식의 쿠키를 netscape 형식으로 가정하거나 
-            # 단순히 파일로 저장 (youtube-transcript-api가 요구하는 형식이어야 함)
+        # 쿠키가 제공된 경우 임시 파일로 저장
+        if cookie_text and len(cookie_text.strip()) > 10:
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as tf:
                 tf.write(cookie_text)
                 cookie_file = tf.name
         
-        # 1차 시도: 특정 언어 지정 fetch
-        api = YouTubeTranscriptApi()
-        
-        # 쿠키 파일이 있으면 사용
+        # 자막 목록 가져오기
         if cookie_file:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'], cookies=cookie_file)
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_file)
         else:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'])
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        full_text = " ".join([t['text'] for t in transcript]).strip()
+        # 1. 한국어/영어 수동 자막 검색 -> 2. 자동 생성 자막 검색 순서로 시도
+        try:
+            # 기본적으로 한국어, 영어 순으로 시도
+            transcript = transcript_list.find_transcript(['ko', 'en'])
+        except:
+            # 수동 자막 없으면 자동 생성 자막 중 한국어, 영어 시도
+            try:
+                transcript = transcript_list.find_generated_transcript(['ko', 'en'])
+            except:
+                # 그것도 없으면 사용 가능한 첫 번째 자막 가져오기
+                transcript = next(iter(transcript_list))
         
+        data = transcript.fetch()
+        full_text = " ".join([t['text'] for t in data]).strip()
+        
+        # 사용 후 임시 파일 삭제
         if cookie_file and os.path.exists(cookie_file):
             os.remove(cookie_file)
             
         return full_text
     except Exception as e:
         if cookie_file and os.path.exists(cookie_file):
-            import os
             os.remove(cookie_file)
             
         error_msg = str(e)
         if "Cookies" in error_msg or "Login" in error_msg:
-            return None, "유튜브에서 접근을 차단했습니다. 사이드바에 쿠키(Cookies)를 입력해보세요."
+            return None, "유튜브가 접근을 차단했습니다. 사이드바에 쿠키(Cookies)를 입력해주세요."
         return None, f"자막을 가져올 수 없습니다: {error_msg}"
 
 # AI 요약 함수
