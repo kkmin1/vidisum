@@ -2,8 +2,6 @@ import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi
 import google.generativeai as genai
 import re
-import os
-import tempfile
 
 # 페이지 설정
 st.set_page_config(page_title="VidiSum - 유튜브 요약기", page_icon="🎥", layout="wide")
@@ -92,76 +90,40 @@ with st.sidebar:
             st.error(f"모델 목록을 불러올 수 없습니다: {e}")
     
     st.markdown("---")
-    st.header("고급 설정")
-    cookie_text = st.text_area(
-        "YouTube Cookies (Netscape format)", 
-        value="",
-        height=150,
-        help="유튜브 차단을 우회하기 위해 브라우저 확장 프로그램(Get cookies.txt 등)으로 추출한 쿠키를 입력하세요."
-    )
-    
-    st.markdown("---")
     st.info("이 앱은 Streamlit과 Google Gemini를 사용하여 제작되었습니다.")
 
-# 유튜브 비디오 ID 추출 함수 (개선됨)
+# 유튜브 비디오 ID 추출 함수
 def extract_video_id(url):
-    # 다양한 유튜브 URL 패턴 지원 (shorts, youtu.be, watch?v= 등)
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
-        r"youtu\.be\/([0-9A-Za-z_-]{11})",
-        r"youtube\.com\/shorts\/([0-9A-Za-z_-]{11})",
-        r"youtube\.com\/live\/([0-9A-Za-z_-]{11})"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
+    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(regex, url)
+    return match.group(1) if match else None
 
-# 자막 추출 함수 (Cookies 지원 및 로직 유연화)
-def get_transcript(video_id, cookie_text=None):
-    cookie_file = None
+# 자막 추출 함수 (사용자님의 원래 방식으로 복구)
+def get_transcript(video_id):
     try:
-        # 쿠키가 제공된 경우 임시 파일로 저장
-        if cookie_text and len(cookie_text.strip()) > 10:
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as tf:
-                tf.write(cookie_text)
-                cookie_file = tf.name
+        # 처음 방식: 특정 언어 지정 fetch
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id, languages=['ko', 'en'])
         
-        # 자막 목록 가져오기
-        if cookie_file:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_file)
+        full_text = ""
+        if hasattr(transcript, 'snippets'):
+            for snippet in transcript.snippets:
+                full_text += snippet.text + " "
         else:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # 1. 한국어/영어 수동 자막 검색 -> 2. 자동 생성 자막 검색 순서로 시도
-        try:
-            # 기본적으로 한국어, 영어 순으로 시도
-            transcript = transcript_list.find_transcript(['ko', 'en'])
-        except:
-            # 수동 자막 없으면 자동 생성 자막 중 한국어, 영어 시도
-            try:
-                transcript = transcript_list.find_generated_transcript(['ko', 'en'])
-            except:
-                # 그것도 없으면 사용 가능한 첫 번째 자막 가져오기
-                transcript = next(iter(transcript_list))
-        
-        data = transcript.fetch()
-        full_text = " ".join([t['text'] for t in data]).strip()
-        
-        # 사용 후 임시 파일 삭제
-        if cookie_file and os.path.exists(cookie_file):
-            os.remove(cookie_file)
+            if isinstance(transcript, list):
+                for item in transcript:
+                    full_text += item.get('text', '') + " "
+            else:
+                 return None, "알 수 없는 자막 형식입니다."
             
-        return full_text
+        return full_text.strip()
     except Exception as e:
-        if cookie_file and os.path.exists(cookie_file):
-            os.remove(cookie_file)
-            
-        error_msg = str(e)
-        if "Cookies" in error_msg or "Login" in error_msg:
-            return None, "유튜브가 접근을 차단했습니다. 사이드바에 쿠키(Cookies)를 입력해주세요."
-        return None, f"자막을 가져올 수 없습니다: {error_msg}"
+        # 실패 시 표준적인 get_transcript 방식으로 한 번 더 시도 (보험용)
+        try:
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'])
+            return " ".join([t['text'] for t in transcript_list]).strip()
+        except:
+            return None, f"자막을 가져올 수 없습니다: {str(e)}"
 
 # AI 요약 함수
 def summarize_text(text, model_name):
@@ -178,7 +140,7 @@ def summarize_text(text, model_name):
         3. 톤앤매너는 명확하고 전문적인 어조를 유지하세요.
 
         [자막 내용]
-        {text[:25000]} 
+        {text[:20000]} 
         """
         response = model.generate_content(prompt)
         return response.text
@@ -200,7 +162,7 @@ if url:
                 st.error("⬅️ 사이드바에서 API 키를 먼저 설정해주세요.")
             else:
                 with st.spinner("자막 추출 및 분석 중..."):
-                    transcript_result = get_transcript(video_id, cookie_text=cookie_text)
+                    transcript_result = get_transcript(video_id)
                     
                     if isinstance(transcript_result, tuple):
                         st.error(transcript_result[1])
